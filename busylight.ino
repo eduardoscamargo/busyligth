@@ -1,8 +1,3 @@
-/*********
-  Rui Santos
-  Complete project details at http://randomnerdtutorials.com  
-*********/
-
 // Load Wi-Fi library
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
@@ -31,6 +26,12 @@ ESP8266WebServer server(80);
 const int output5 = 5;
 
 unsigned int state = 0; /* 0 - WiFi configuration; 1 - normal use */
+
+IPAddress local_IP(192, 168, 0, 70);
+IPAddress gateway(192, 168, 0, 1);
+IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(8, 8, 8, 8);   //optional
+IPAddress secondaryDNS(8, 8, 4, 4); //optional
 
 void handleSignChange() {
   String message = "";
@@ -194,6 +195,12 @@ void setup() {
   // Connecting to configured WiFi
   if (ssid.length()) {
     state = 1;
+        
+    if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+      errorConnectingToWifi();
+      
+      Serial.println("STA Failed to configure");
+    }
     
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, pwd);
@@ -210,6 +217,7 @@ void setup() {
       Serial.print("WiFi connected. IP: ");
       Serial.println(WiFi.localIP());
       Serial.println();
+      
     } else {
       errorConnectingToWifi();
       
@@ -217,6 +225,8 @@ void setup() {
       Serial.println("Failed to connect to SSID: " + ssid);
       Serial.println();
     }
+
+    ESP.deepSleep(2e6); // 2 seconds;
 
   // Entering WiFi configuration
   } else {
@@ -235,8 +245,6 @@ void setup() {
   }
   EEPROM.end();
   
-  wifi_set_sleep_type(LIGHT_SLEEP_T);
-  
   server.on("/sign_change", handleSignChange);
   server.on("/config_wifi", handleConfigWifi);
   server.on("/reset_wifi", handleResetWifi);
@@ -247,7 +255,6 @@ void setup() {
 
 void loop(){
   server.handleClient();
-  delay(10000);
 }
 
 void writeStringToEEPROM(int addrOffset, const String &strToWrite) {
