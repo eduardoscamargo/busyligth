@@ -1,11 +1,12 @@
-// Load Wi-Fi library
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 #define FASTLED_ESP8266_NODEMCU_PIN_ORDER
 #include <FastLED.h>
+#include <PubSubClient.h>
 
+/* LEDs */
 #define LED_PIN     2
 #define NUM_LEDS    3
 #define BRIGHTNESS  64
@@ -14,68 +15,76 @@
 #define UPDATES_PER_SECOND 40
 #define MILLI_AMPS 100 // Consumption: 1mA (off) / 13.5 (red) / 35mA (white)
 
+/* MQTT */
+#define MQTT_SERVER      "node02.myqtthub.com"
+#define MQTT_PORT        1883
+#define TOPIC_SUBSCRIBE  "busylight/camargo"
+#define MQTT_DEVICE_NAME "esp123"
+#define MQTT_USER        "esp123"
+#define MQTT_PASSWORD    "esp123"
+/* How much ESP will sleep each cycle */
+#define SLEEP_TIME 2e6
+
+/* State machine */
+#define CONFIG_MODE 0
+#define NORMAL_MODE 1
+
+/* Position of information in EEPROM */
 #define EEPROM_SSID 0
 #define EEPROM_PWD 34
+
+#define RESET_PIN D5
 
 CRGB leds[NUM_LEDS];
 
 // Set web server port number to 80
-ESP8266WebServer server(80);
+ESP8266WebServer server(80); // Used only during configuration
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+static const char *fingerprint PROGMEM = "AD 48 93 93 BF 35 FA 00 94 D0 5D 06 39 BC 68 49 4F 5A C7 A3";
+
+String ssid = "";
 
 // Assign output variables to GPIO pins
 const int output5 = 5;
 
 unsigned int state = 0; /* 0 - WiFi configuration; 1 - normal use */
 
-IPAddress local_IP(192, 168, 0, 70);
-IPAddress gateway(192, 168, 0, 1);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(8, 8, 8, 8);   //optional
-IPAddress secondaryDNS(8, 8, 4, 4); //optional
-
-void handleSignChange() {
-  String message = "";
-  String status = server.arg("status");
-
-  if (status == "on") {
-    message = "Turning sign on...";
-
-    fill_solid(leds, NUM_LEDS, CRGB::Red);
-    FastLED.show(); 
-  } else if (status == "off") {
-    message = "Turning sign off...";
- 
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-    FastLED.show(); 
-  } else {  
-    message = "Provide a valid status.";
+void writeStringToEEPROM(int addrOffset, const String &strToWrite) {
+  byte len = strToWrite.length();
+  EEPROM.write(addrOffset, len);
+  
+  for (int i = 0; i < len; i++) {
+    EEPROM.write(addrOffset + 1 + i, strToWrite[i]);
   }
+}
 
-  String payload = server.arg("plain");
-
-  if (!payload.length()) {
-    server.send(200, "text/plain", message);
+String readStringFromEEPROM(int addrOffset) {
+  int newStrLen = EEPROM.read(addrOffset);
+  char data[newStrLen + 1];
+  
+  for (int i = 0; i < newStrLen; i++) {
+    data[i] = EEPROM.read(addrOffset + 1 + i);
   }
   
-  StaticJsonDocument<96> doc;
-  DeserializationError error = deserializeJson(doc, payload);
+  data[newStrLen] = '\0';
+  return String(data);
+}
 
-  if (error) {
-    Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.f_str());
-    return;
+void handleSignChange(bool status, int r_channel, int g_channel, int b_channel) {
+  String message = "";
+
+  if (status) {
+    leds[0].setRGB(r_channel, g_channel, b_channel);
+    leds[1].setRGB(r_channel, g_channel, b_channel);
+    leds[2].setRGB(r_channel, g_channel, b_channel);
+
+    FastLED.show(); 
+  } else {
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show(); 
   }
-
-  const char* color = doc["color"];
-  const char* animation = doc["animation"];
-
-  Serial.print("Color: ");
-  Serial.println(color);
-  Serial.print("Animation: ");
-  Serial.println(animation);
-  Serial.println();
-
-  server.send(200, "text/plain", message);
 }
   
 void handleConfigWifi() {
@@ -96,9 +105,6 @@ void handleConfigWifi() {
   const char *pwd_c = doc["pwd"];  
   const String ssid = String(ssid_c);
   const String pwd = String(pwd_c);
-  
-  fill_solid(leds, NUM_LEDS, CRGB::Red);
-  FastLED.show(); 
 
   if (ssid.length()) {
     EEPROM.begin(100);
@@ -128,15 +134,14 @@ void handleConfigWifi() {
   } 
 }
 
-void handleResetWifi() {
+void resetMemory() {
   EEPROM.begin(100);
   writeStringToEEPROM(EEPROM_SSID, "");
   writeStringToEEPROM(EEPROM_PWD, "");
   EEPROM.end();
-
-  server.send(200, "text/plain", "Wifi configuration reseted");
 }
 
+// Fast blink 5 times if an error was found during the Wifi configuration
 void errorConfiguringWifi() {
   for (int i=0; i<5; i++) {
     fill_solid(leds, NUM_LEDS, CRGB::Red);
@@ -170,112 +175,188 @@ void errorConnectingToWifi() {
   }
 }
 
-void successConectingToWifi() {
-  fill_solid(leds, NUM_LEDS, CRGB::Red);
-  FastLED.show(); 
-  delay(100);
+// Gets password from EEPROM and tries to connect to the configured Wifi network
+void connectToWifi() {  
+  String pwd = readStringFromEEPROM(EEPROM_PWD);
   
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
+  state = NORMAL_MODE;
+    
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pwd);
+
+  uint32_t loopStart = millis();
+    
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+
+    if (millis() - loopStart > 5000) {
+      errorConnectingToWifi();
+      ESP.deepSleep(SLEEP_TIME);
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  
+  Serial.println();
+
+  StaticJsonDocument<96> doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    errorConfiguringWifi();    
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return;
+  }
+
+  if (doc["status"].isNull()) {
+    Serial.println("Status not present in the message.");
+    return;
+  }
+  
+  const bool status = doc["status"];
+  const int r_channel = doc["r"].isNull() ? 255 : doc["r"];  
+  const int g_channel = doc["g"].isNull() ? 0 : doc["g"];
+  const int b_channel = doc["b"].isNull() ? 0 : doc["b"];
+
+  handleSignChange(status, r_channel, g_channel, b_channel);
+}
+
+void connectMQTT() {
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+  client.setCallback(callback);
+  
+  Serial.print("Attempting MQTT connection...");
+  
+//  // Create a random client ID
+//  String clientId = "BusyLightEduardo-";
+//  clientId += String(random(0xffff), HEX);
+  
+  // Attempt to connect
+  if (client.connect(MQTT_DEVICE_NAME, MQTT_USER, MQTT_PASSWORD)) {    
+    Serial.println("connected");
+    
+    // ... and subscribe
+    client.subscribe(TOPIC_SUBSCRIBE);
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(client.state());
+  }
+}
+
+void configureForInitialUse() {
+  state = CONFIG_MODE;
+
+  IPAddress local_IP(192,168,0,2);
+  IPAddress gateway(192,168,0,1);
+  IPAddress subnet(255,255,255,0);
+  
+  WiFi.softAPConfig(local_IP, gateway, subnet);
+  WiFi.softAP("busylight0001");
+  
+  Serial.print("Soft-AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.println();
+}
+
+void configureLed() {
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, MILLI_AMPS);
+}
+
+void listenResetButton() {    
+  uint32_t loopStart = millis();
+  bool buttonPressed = false;
+    
+  while (digitalRead(RESET_PIN)) {  
+    buttonPressed = true;
+    fill_solid(leds, NUM_LEDS, CRGB::Orange);
+    FastLED.show();
+    yield();
+
+    // Wait for 3 seconds
+    if (millis() - loopStart > 3000) {
+      for (int i=0; i<16; i++) {
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        FastLED.show();
+        delay(50);
+        
+        fill_solid(leds, NUM_LEDS, CRGB::Orange);
+        FastLED.show();
+        delay(50);        
+      }
+      
+      fill_solid(leds, NUM_LEDS, CRGB::Black);
+      FastLED.show();
+      
+      resetMemory();
+      
+      ESP.deepSleep(1e6);
+    }
+  }
+
+  if (buttonPressed) {
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
+  }
 }
 
 void setup() {  
   Serial.begin(115200);
+  configureLed();
+
+  pinMode(RESET_PIN, INPUT_PULLUP);
+
+  listenResetButton();
 
   EEPROM.begin(100);
+  ssid = readStringFromEEPROM(EEPROM_SSID);
   checkInitializedEEPROM(100);
-  String ssid = readStringFromEEPROM(EEPROM_SSID);
-  String pwd = readStringFromEEPROM(EEPROM_PWD);
-
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, MILLI_AMPS);
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
 
   // Connecting to configured WiFi
   if (ssid.length()) {
-    state = 1;
-        
-    if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-      errorConnectingToWifi();
-      
-      Serial.println("STA Failed to configure");
-    }
+    connectToWifi();
+    randomSeed(micros());
+    connectMQTT();
     
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, pwd);
-
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {       
-      successConectingToWifi();
-      
-      Serial.println();
-      Serial.print("WiFi connected. IP: ");
-      Serial.println(WiFi.localIP());
-      Serial.println();
-      
-    } else {
-      errorConnectingToWifi();
-      
-      Serial.println();
-      Serial.println("Failed to connect to SSID: " + ssid);
-      Serial.println();
-    }
-
-    ESP.deepSleep(2e6); // 2 seconds;
-
+    EEPROM.end();
+    
   // Entering WiFi configuration
   } else {
-    state = 0;
-
-    IPAddress local_IP(192,168,0,2);
-    IPAddress gateway(192,168,0,1);
-    IPAddress subnet(255,255,255,0);
+    configureForInitialUse();
     
-    WiFi.softAPConfig(local_IP, gateway, subnet);
-    WiFi.softAP("sign1234");
+    EEPROM.end();
     
-    Serial.print("Soft-AP IP address: ");
-    Serial.println(WiFi.softAPIP());
-    Serial.println();
+    server.on("/config_wifi", handleConfigWifi);
+    server.begin();
   }
-  EEPROM.end();
-  
-  server.on("/sign_change", handleSignChange);
-  server.on("/config_wifi", handleConfigWifi);
-  server.on("/reset_wifi", handleResetWifi);
-  server.begin();
-  
-  Serial.println("Server listening...");
 }
 
 void loop(){
-  server.handleClient();
-}
-
-void writeStringToEEPROM(int addrOffset, const String &strToWrite) {
-  byte len = strToWrite.length();
-  EEPROM.write(addrOffset, len);
-  
-  for (int i = 0; i < len; i++) {
-    EEPROM.write(addrOffset + 1 + i, strToWrite[i]);
+  if (state == NORMAL_MODE) {
+    listenResetButton();
+    
+    uint32_t loopStart = millis();
+    
+    while (millis() - loopStart < 300) { 
+      if (!client.connected()) { 
+        connectMQTT(); 
+       } 
+      else client.loop(); 
+    }
+    
+    ESP.deepSleep(SLEEP_TIME);
+  } else if (state == CONFIG_MODE) {
+    server.handleClient();
   }
-}
-
-String readStringFromEEPROM(int addrOffset) {
-  int newStrLen = EEPROM.read(addrOffset);
-  char data[newStrLen + 1];
-  
-  for (int i = 0; i < newStrLen; i++) {
-    data[i] = EEPROM.read(addrOffset + 1 + i);
-  }
-  
-  data[newStrLen] = '\0';
-  return String(data);
 }
 
 void checkInitializedEEPROM(const int validationSize) {
