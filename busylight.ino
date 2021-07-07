@@ -22,35 +22,35 @@
 #define MQTT_DEVICE_NAME "esp123"
 #define MQTT_USER        "esp123"
 #define MQTT_PASSWORD    "esp123"
-/* How much ESP will sleep each cycle */
+
+/* How much ESP will sleep each cycle. */
 #define SLEEP_TIME 2e6
 
 /* State machine */
-#define CONFIG_MODE 0
-#define NORMAL_MODE 1
+#define CONFIG_MODE 0 /* Wifi configuration - it enables the internal HTTP server. */
+#define NORMAL_MODE 1 /* Normal operation - reads MQTT message from broker. */
+unsigned int state = CONFIG_MODE;
 
-/* Position of information in EEPROM */
+/* Position of information in EEPROM. */
 #define EEPROM_SSID 0
 #define EEPROM_PWD 34
 
+/* Button to reset the EEPROM to factory. */
 #define RESET_PIN D5
 
 CRGB leds[NUM_LEDS];
 
-// Set web server port number to 80
-ESP8266WebServer server(80); // Used only during configuration
+/* Set web server port number to 80. Used only in CONFIG_MODE. */
+ESP8266WebServer server(80); 
 
+/* Configure the MQTT client. Used only in NORMAL_MODE. */
 WiFiClient espClient;
 PubSubClient client(espClient);
-static const char *fingerprint PROGMEM = "AD 48 93 93 BF 35 FA 00 94 D0 5D 06 39 BC 68 49 4F 5A C7 A3";
 
+/* Wifi SSID. */
 String ssid = "";
 
-// Assign output variables to GPIO pins
-const int output5 = 5;
-
-unsigned int state = 0; /* 0 - WiFi configuration; 1 - normal use */
-
+/* Writes a string to EEPROM. */
 void writeStringToEEPROM(int addrOffset, const String &strToWrite) {
   byte len = strToWrite.length();
   EEPROM.write(addrOffset, len);
@@ -60,6 +60,7 @@ void writeStringToEEPROM(int addrOffset, const String &strToWrite) {
   }
 }
 
+/* Reads a string from EEPROM. */
 String readStringFromEEPROM(int addrOffset) {
   int newStrLen = EEPROM.read(addrOffset);
   char data[newStrLen + 1];
@@ -72,21 +73,20 @@ String readStringFromEEPROM(int addrOffset) {
   return String(data);
 }
 
+/* Turn on or off the sign with the selected color. */
 void handleSignChange(bool status, int r_channel, int g_channel, int b_channel) {
-  String message = "";
-
   if (status) {
     leds[0].setRGB(r_channel, g_channel, b_channel);
     leds[1].setRGB(r_channel, g_channel, b_channel);
     leds[2].setRGB(r_channel, g_channel, b_channel);
-
     FastLED.show(); 
   } else {
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show(); 
   }
 }
-  
+
+/* Reads the HTTP post to configure the Wifi. */
 void handleConfigWifi() {
   String payload = server.arg("plain");
   String message = "";
@@ -118,12 +118,11 @@ void handleConfigWifi() {
     }
     EEPROM.end();
 
-    successConfiguringWifi();    
     message = "New SSID (" + ssid + ") saved with success with password (" + pwd + ").";
     
     server.send(200, "text/plain", message);
 
-    delay(3000);
+    successConfiguringWifi();
     
     ESP.restart();
   } else {
@@ -134,6 +133,7 @@ void handleConfigWifi() {
   } 
 }
 
+/* Clean the EEPROM. */
 void resetMemory() {
   EEPROM.begin(100);
   writeStringToEEPROM(EEPROM_SSID, "");
@@ -141,7 +141,7 @@ void resetMemory() {
   EEPROM.end();
 }
 
-// Fast blink 5 times if an error was found during the Wifi configuration
+/* Fast blink 5 times if an error was found during the Wifi configuration during CONFIG_MODE. */
 void errorConfiguringWifi() {
   for (int i=0; i<5; i++) {
     fill_solid(leds, NUM_LEDS, CRGB::Red);
@@ -154,6 +154,7 @@ void errorConfiguringWifi() {
   }
 }
 
+/* Turn on sign for 2 seconds if the Wifi configuration works during CONFIG_MODE. */
 void successConfiguringWifi() {
   fill_solid(leds, NUM_LEDS, CRGB::Red);
   FastLED.show();  
@@ -163,6 +164,7 @@ void successConfiguringWifi() {
   FastLED.show();
 }
 
+/* Fast blink 3 times if an error was found during the Wifi connection during NORMAL_MODE. */
 void errorConnectingToWifi() {
   for (int i=0; i<3; i++) {
     fill_solid(leds, NUM_LEDS, CRGB::Red);
@@ -175,7 +177,7 @@ void errorConnectingToWifi() {
   }
 }
 
-// Gets password from EEPROM and tries to connect to the configured Wifi network
+/* Gets password from EEPROM and tries to connect to the configured Wifi network. */
 void connectToWifi() {  
   String pwd = readStringFromEEPROM(EEPROM_PWD);
   
@@ -196,6 +198,7 @@ void connectToWifi() {
   }
 }
 
+/* Reads and parse the MQTT message. */
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -230,6 +233,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   handleSignChange(status, r_channel, g_channel, b_channel);
 }
 
+/* Connect to MQTT broker. */
 void connectMQTT() {
   client.setServer(MQTT_SERVER, MQTT_PORT);
   client.setCallback(callback);
@@ -252,6 +256,7 @@ void connectMQTT() {
   }
 }
 
+/* Configure the local HTTP server during CONFIG_MODE. */
 void configureForInitialUse() {
   state = CONFIG_MODE;
 
@@ -267,11 +272,13 @@ void configureForInitialUse() {
   Serial.println();
 }
 
+/* Configure the LED strip. */
 void configureLed() {
   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, MILLI_AMPS);
 }
 
+/* Runs the reset procedure if the RESET_PIN is pressed by more than 3 seconds. */ 
 void listenResetButton() {    
   uint32_t loopStart = millis();
   bool buttonPressed = false;
@@ -309,6 +316,7 @@ void listenResetButton() {
   }
 }
 
+/* Setup function. */
 void setup() {  
   Serial.begin(115200);
   configureLed();
@@ -340,6 +348,10 @@ void setup() {
   }
 }
 
+/* 
+ * During NORMAL_MODE it connects to MQTT broker, reads a message and go to deep sleep by SLEEP_TIME. 
+ * During CONFIG_MODE it loads a local HTTP server to wait for the configuration Wifi request. 
+ */
 void loop(){
   if (state == NORMAL_MODE) {
     listenResetButton();
@@ -359,6 +371,7 @@ void loop(){
   }
 }
 
+/* Checks if the EEPROM is initialized. */
 void checkInitializedEEPROM(const int validationSize) {
   for (int i = 0; i < validationSize; i++) {
     if (EEPROM.read(i) != 255) {
@@ -370,6 +383,7 @@ void checkInitializedEEPROM(const int validationSize) {
   initializeEEPROM(validationSize);
 }
 
+/* Initializes EEPROM writing \0 to all positions. */
 void initializeEEPROM(const int EEPROMSize) {
   for (int i = 0; i < EEPROMSize; i++) {
     EEPROM.write(i, '\0');
