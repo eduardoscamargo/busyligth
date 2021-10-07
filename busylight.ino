@@ -16,15 +16,16 @@
 #define MILLI_AMPS 100 // Consumption: 1mA (off) / 13.5 (red) / 35mA (white)
 
 /* MQTT */
-#define MQTT_SERVER      "node02.myqtthub.com"
+//#define MQTT_SERVER      "node02.myqtthub.com"
+#define MQTT_SERVER      "192.168.0.241"
 #define MQTT_PORT        1883
 #define TOPIC_SUBSCRIBE  "busylight/camargo"
-#define MQTT_DEVICE_NAME "esp123"
-#define MQTT_USER        "esp123"
-#define MQTT_PASSWORD    "esp123"
+#define MQTT_DEVICE_NAME "busylight-camargo"
+#define MQTT_USER        "busylight"
+#define MQTT_PASSWORD    "busylight_eduardo"
 
 /* How much ESP will sleep each cycle. */
-#define SLEEP_TIME 2e6
+#define SLEEP_TIME 3e6
 
 /* State machine */
 #define CONFIG_MODE 0 /* Wifi configuration - it enables the internal HTTP server. */
@@ -37,6 +38,9 @@ unsigned int state = CONFIG_MODE;
 
 /* Button to reset the EEPROM to factory. */
 #define RESET_PIN D5
+
+/* Input for battery voltage. */
+#define BATTERY_PIN A0    
 
 CRGB leds[NUM_LEDS];
 
@@ -283,7 +287,7 @@ void listenResetButton() {
   uint32_t loopStart = millis();
   bool buttonPressed = false;
     
-  while (digitalRead(RESET_PIN)) {  
+  while (!digitalRead(RESET_PIN)) {  
     buttonPressed = true;
     fill_solid(leds, NUM_LEDS, CRGB::Orange);
     FastLED.show();
@@ -295,6 +299,7 @@ void listenResetButton() {
         fill_solid(leds, NUM_LEDS, CRGB::Black);
         FastLED.show();
         delay(50);
+        
         
         fill_solid(leds, NUM_LEDS, CRGB::Orange);
         FastLED.show();
@@ -353,7 +358,12 @@ void setup() {
  * During CONFIG_MODE it loads a local HTTP server to wait for the configuration Wifi request. 
  */
 void loop(){
+  //  Serial.print("Battery: ");
+//  Serial.println(sensorValue * 0.0050902); // 3.3 * 1.724 * 0.916 / 1024 = 0.0050902845670391
+  
   if (state == NORMAL_MODE) {
+    int sensorValue = analogRead(BATTERY_PIN);
+    
     listenResetButton();
     
     uint32_t loopStart = millis();
@@ -362,6 +372,9 @@ void loop(){
       if (!client.connected()) { 
         connectMQTT(); 
        } 
+
+
+       
       else client.loop(); 
     }
     
